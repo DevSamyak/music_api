@@ -117,6 +117,7 @@ class SaavnService:
                 song_url, timeout=settings.REQUEST_TIMEOUT
             )
             song_data = song_response.text.encode().decode("unicode-escape")
+            song_data = re.sub(r'\(From "([^"]+)"\)', r"(From '\1')", song_data)  # add this
             song_data = json.loads(song_data)
             if song_id not in song_data:
                 return None
