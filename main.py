@@ -54,7 +54,7 @@ def create_app() -> FastAPI:
     GlobalExceptionHandler(fastapi_app)
     # Include routers
     
-    @fastapi_app.get("/", response_class=HTMLResponse, tags=["Root"])
+    @fastapi_app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse, tags=["Root"])
     async def read_root():
         # Path to the README file
         readme_path = os.path.join(os.path.dirname(__file__), "README.md")
