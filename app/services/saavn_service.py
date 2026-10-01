@@ -37,6 +37,21 @@ class SaavnService:
         )
 
     @classmethod
+    def _parse_saavn_json(cls, text: str) -> dict:
+        """
+        Parse a Saavn response body.
+        Plain JSON is tried first. The old `unicode-escape` trick is kept only
+        as a fallback, because it turns a valid \\" into a bare " (breaking
+        the JSON) and garbles non-ASCII characters.
+        """
+        try:
+            return json.loads(text)
+        except ValueError:
+            data = text.encode().decode("unicode-escape")
+            data = re.sub(r'\(From "([^"]+)"\)', r"(From '\1')", data)
+            return json.loads(data)
+
+    @classmethod
     def get_song_id(cls, url: str) -> str:
         """
         Extract song ID from a Saavn URL.
@@ -116,9 +131,7 @@ class SaavnService:
             song_response = requests.get(
                 song_url, timeout=settings.REQUEST_TIMEOUT
             )
-            song_data = song_response.text.encode().decode("unicode-escape")
-            song_data = re.sub(r'\(From "([^"]+)"\)', r"(From '\1')", song_data)  # add this
-            song_data = json.loads(song_data)
+            song_data = cls._parse_saavn_json(song_response.text)
             if song_id not in song_data:
                 return None
             processed_song = cls.format_song_data(
@@ -128,6 +141,34 @@ class SaavnService:
         except Exception as e:
             logger.error("Error fetching song details: %s", e)
             raise
+
+    @classmethod
+    def get_songs_batch(
+        cls, song_ids: List[str], include_lyrics: bool = False
+    ) -> List[Dict]:
+        """
+        Retrieve many songs with ONE request (pids is comma-separated),
+        instead of one request per song. Songs that can't be processed are
+        skipped; the order of `song_ids` is kept.
+        """
+        if not song_ids:
+            return []
+        url = (
+            f"{cls.BASE_URL}?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0"
+            f"&_format=json&pids={','.join(song_ids)}"
+        )
+        response = requests.get(url, timeout=settings.REQUEST_TIMEOUT)
+        data = cls._parse_saavn_json(response.text)
+        songs = []
+        for song_id in song_ids:
+            raw = data.get(song_id)
+            if not raw:
+                continue
+            try:
+                songs.append(cls.format_song_data(raw, include_lyrics))
+            except Exception as e:  # one bad song shouldn't fail the list
+                logger.warning("Skipping song %s: %s", song_id, e)
+        return songs
 
     @classmethod
     def get_album(
@@ -146,8 +187,7 @@ class SaavnService:
             response = requests.get(
                 album_url, timeout=settings.REQUEST_TIMEOUT
             )
-            album_data = response.text.encode().decode("unicode-escape")
-            album_data = json.loads(album_data)
+            album_data = cls._parse_saavn_json(response.text)
             # Process album data
             album_data["image"] = album_data["image"].replace(
                 "150x150", "500x500"
@@ -181,8 +221,7 @@ class SaavnService:
             response = requests.get(
                 playlist_url, timeout=settings.REQUEST_TIMEOUT
             )
-            playlist_data = response.text.encode().decode("unicode-escape")
-            playlist_data = json.loads(playlist_data)
+            playlist_data = cls._parse_saavn_json(response.text)
             # Process playlist data
             playlist_data["firstname"] = cls._format_string(
                 playlist_data["firstname"]
@@ -320,16 +359,24 @@ class SaavnService:
                     search_url, timeout=settings.REQUEST_TIMEOUT
                 )
                 # Process response
-                response_text = response.text.encode().decode("unicode-escape")
-                response_text = re.sub(
-                    r'\(From "([^"]+)"\)', r"(From '\1')", response_text
-                )
-                search_results = json.loads(response_text)
+                search_results = cls._parse_saavn_json(response.text)
                 song_results = search_results.get("songs", {}).get("data", [])
             # Return basic or full data
             if not full_data:
                 return song_results
-            # Fetch details in parallel (was one request after another).
+
+            # Fast path: fetch every song's details with ONE request.
+            ids = [s["id"] for s in song_results if s.get("id")]
+            try:
+                batch = cls.get_songs_batch(ids, include_lyrics)
+                if batch:
+                    return batch
+            except Exception as e:
+                logger.warning(
+                    "Batch fetch failed, using per-song fetch: %s", e
+                )
+
+            # Fallback: fetch details in parallel, one request per song.
             # map() keeps the original result order.
             def _details(song: Dict) -> Optional[Dict]:
                 try:
