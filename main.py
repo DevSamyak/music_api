@@ -130,5 +130,9 @@ def create_app() -> FastAPI:
     logger.info("Application initialized successfully")
     return fastapi_app
 
+    @fastapi_app.api_route("/health", methods=["GET", "HEAD"], tags=["Health Check"])
+    async def health():
+        return {"status": "ok"}
+
 
 app = create_app()
